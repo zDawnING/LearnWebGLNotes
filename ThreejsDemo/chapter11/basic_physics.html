@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+<head>
+	<title>基础物理引擎应用</title>
+</head>
+<style type="text/css">
+	body{
+		/*设置全屏*/
+		margin: 0;
+		overflow: hidden;
+	}
+</style>
+<body>
+
+	<div id="stats-output"></div>
+	<div id="webgl-output"></div>
+	
+	<script type="text/javascript" src="../lib/three.js"></script>
+	<script type="text/javascript" src="../lib/stats.js"></script>
+	<!-- 相机控制 -->
+	<script type="text/javascript" src="../lib/controls/OrbitControls.js"></script>
+	<!-- ammo.js的包装器，属于简单应用引擎的threejs插件 -->
+	<script type="text/javascript" src="../lib/physi.js"></script>
+	<!-- 这里加入颜色处理器，生成指定范围并好看的颜色, 并进行各种格式的转换 -->
+	<script type="text/javascript" src="../lib/chroma.js"></script>
+	<!-- 噪音生成器 -->
+	<script type="text/javascript" src="../lib/perlin.js"></script>
+
+	<script type="text/javascript" src="../lib/dat.gui.js"></script>
+
+	<script type="text/javascript">
+		
+
+	</script>
+
+	<script type="text/javascript">
+
+		// Physijs 只是ammo.js的一个包装器，ammo.js是基于bullet physics物理引擎直接编译过来的js文件
+		// 引入H5的web workers(网页线程)，使引擎可以在一个单独的线程里执行cpu密集的任务，从而不影响渲染
+		Physijs.scripts.worker = '../lib/physijs_worker.js';
+    Physijs.scripts.ammo = '../lib/ammo.js';
+		
+		// 定义全局变量
+		var camera; // 相机
+		var scene; // 场景对象
+		var renderer; // 渲染器
+		// 辅助组件
+		var stats; // 检测动画运行帧频
+		var gui; // 控制界面变量的组件
+
+		// 场景对象(放置全局方便特殊处理)
+		var ground, meshs = [], dominos = [], car;
+		var sliderConstraint, doorConstraintLeft, doorConstraintRight, ballPinConstraint, carConstraint;
+		// 场景相关控制变量
+		var step = 0, direction = 1, fallDownHight = 15; // 记录增量
+    var controls,
+    		materialContr,
+    		constraintContr,
+    		carContr;
+    var clock;
+    var orbitControls;
+    // 指定生成颜色的范围
+    var colorScale = chroma.scale(['white', 'blue', 'red', 'yellow']);
+
+    /**
+     * ===============================
+     * 目前经过测试：这套东西的问题主要有：
+     * 1. 当场景中所有加载完成后，如果地面是静态的，当其他物体生成至场景中后，再转动地面，则会产生一些相交检测bug，
+     * 因此解决方案是地面如果是先静态后动态，最好的方式是不先转动地面，再生成物体，这样一来相交检测的问题即可解决
+     * 2. 尽量避免地面角度变化太快，这样会导致物体与地面间的相交性检测运行不过来，而出现一些穿透、弹跳现象。
+     * 3. 动态改变已经生产的物体材质会目前没有看到有有效的方法。
+     * 
+     * ===============================
+     */
+
+    /**
+     * 初始化控制器
+     * @return {[type]} [description]
+     */
+    function initControler(){
+    	controls = new function () {
+    		this.groundType = "plane";
+    		this.selectPlaneGround = function(){
+    			controls.groundType = "plane";
+    			scene.remove(ground);
+    			controls.clearMesh();
+
+    			createGround();
+    		}
+    		this.selectHightMapGround = function(){
+    			controls.groundType = "hightMap";
+    			scene.remove(ground);
+    			controls.clearMesh();
+
+    			var date = new Date();
+          var pn = new Perlin('rnd' + date.getTime());
+    			createHightMapGround(pn);
+    		}
+
+    		this.gravityX = 0;
+        this.gravityY = -50;
+        this.gravityZ = 0;
+        this.startDomino = function(){
+        	pushFirstDomino();
+        }
+        // 使地面倾斜 22.5°
+	    	this.rotationSpeed = 0.0005;
+	    	this.slopeGround = false;
+	    	this.resetGround = function(){
+	    		controls.slopeGround = false;
+	    		step = 0;
+	    		if(controls.groundType == 'plane'){
+	    			ground.rotation.z = step ;
+	    		}else if(controls.groundType == 'hightMap'){
+	    			ground.rotation.y = step;
+	    		}
+	    		ground.__dirtyRotation = true;
+	    	}
+	    	this.loadDominos = function(){
+	    		var points = createPoints();
+	    		loadDominoObjects(points);
+	    	}
+	    	this.addSphere = function(){
+	    		addRandomSpheres();
+	    	}
+	    	this.addCube = function(){
+	    		addRandomCubes();
+	    	}
+	    	this.addCylinder = function(){
+	    		addRandomCylinders();
+	    	}
+	    	this.addCone = function(){
+	    		addRandomCones();
+	    	}
+	    	this.addCapsules = function(){
+	    		addRandomCapsules();
+	    	}
+	    	this.addConvexs = function(){
+	    		addRandomConvexs();
+	    	}
+	    	this.clearMesh = function(){
+	    		meshs.forEach(function(e){
+	    			scene.remove(e);
+	    		})
+	    		meshs = [];
+          dominos = [];
+	    	}
+	    };
+	    materialContr = new function(){
+	    	// Friction: 摩擦力系数
+	    	// Restitution: 回弹系数
+	    	this.planeFriction = 0.9;  // 地面高摩擦,低回弹
+	    	this.planeRestitution = 0.3; 
+	    	this.cubeFriction = 0.9;  // 立方体高摩擦,低回弹
+	    	this.cubeRestitution = 0.3; 
+	    	this.sphereFriction = 0.1;  // 球体低摩擦，高回弹
+	    	this.sphereRestitution = 0.9;
+	    	
+	    	this.updatePlaneMaterial = function(){
+	    		// 暂时测试出对已生成的材质修改是失效的
+	    		// ground.material._physijs.friction = materialContr.planeFriction;
+	    		// ground.material._physijs.restitution = materialContr.planeRestitution;
+	    		// ground.material.needsUpdate = true;
+	    	}
+	    }
+	    constraintContr = new function(){
+	    	this.acceleration = 2; // 加速度
+        this.velocity = -10; // 速度（含方向）
+	    	this.addSliders = function(){
+	    		sliderConstraint = addSliderCubes(6, 2, 5);
+	    	}
+	    	this.toggleMoveSlider = function () {
+	    		// 用于关闭线性马达
+          sliderConstraint.disableLinearMotor();
+          // 启用线性马达
+          sliderConstraint.enableLinearMotor(constraintContr.velocity, constraintContr.acceleration);
+          constraintContr.velocity *= -1; //
+        }
+        this.addDoor = function(){
+        	// addDoorHinges();
+        	doorConstraintLeft = createLeftFlipper();
+        	doorConstraintRight = createRightFlipper();
+        }
+        this.toggleMoveDoor = function(){
+        	doorConstraintLeft.disableMotor();
+          doorConstraintLeft.enableAngularMotor(constraintContr.velocity, constraintContr.acceleration);
+          doorConstraintRight.disableMotor();
+          doorConstraintRight.enableAngularMotor(-constraintContr.velocity, constraintContr.acceleration);
+          constraintContr.velocity *= -1;
+        }
+        this.motorTargetX = 0;
+	      this.motorTargetY = 0;
+	      this.motorTargetZ = 0;
+        this.addBallPin = function(){
+        	ballPinConstraint = createConeTwist();
+        }
+        this.updateBallPin = function(){
+        	ballPinConstraint.enableMotor();
+          ballPinConstraint.setMotorTarget(
+          	new THREE.Vector3(constraintContr.motorTargetX, constraintContr.motorTargetY, constraintContr.motorTargetZ));
+        }
+        this.addCar = function(){
+        	carConstraint = createCar();
+        }
+	    }
+	    carContr = new function(){
+	    	this.velocity = -2;
+        this.wheelAngle = 0.5;
+        // this.loosenXRight = 0.0001;
+        // this.loosenXLeft = 0.0001;
+        this.changeVelocity = function () {
+          // 如果要加一个马达，当前的约束就会重载
+          car.tlCons.configureAngularMotor(2, 0.1, 0, carContr.velocity, 15000);
+          car.trCons.configureAngularMotor(2, 0.1, 0, carContr.velocity, 15000);
+
+          // 1个马达则表示马达仅可以左右转动
+       		// car.trCons.enableAngularMotor(1);
+
+          // 2个马达可以前后
+          car.tlCons.enableAngularMotor(2);
+          car.trCons.enableAngularMotor(2);
+        };
+        // this.changeOrientation = function () {
+        //   car.brCons.setAngularLowerLimit({x: 0, y: controls.wheelAngle, z: 0.1});
+        //   car.brCons.setAngularUpperLimit({x: controls.loosenXRight, y: controls.wheelAngle, z: 0});
+        //   car.blCons.setAngularLowerLimit({x: controls.loosenXLeft, y: controls.wheelAngle, z: 0.1});
+        //   car.blCons.setAngularUpperLimit({x: 0, y: controls.wheelAngle, z: 0});
+        // }
+	    }
+
+    	gui = new dat.GUI();
+    	gui.add(controls, 'groundType').listen();
+    	gui.add(controls, 'selectPlaneGround');
+    	gui.add(controls, 'selectHightMapGround');
+    	gui.add(controls, 'loadDominos');
+    	gui.add(controls, 'startDomino');
+    	gui.add(controls, 'clearMesh');
+
+    	var addFolder = gui.addFolder("Add Geometry");
+    	addFolder.add(controls, 'addCube');
+    	addFolder.add(controls, 'addSphere');
+    	addFolder.add(controls, 'addCylinder');
+    	addFolder.add(controls, 'addCone');
+    	addFolder.add(controls, 'addCapsules');
+    	addFolder.add(controls, 'addConvexs');
+    	
+
+    	var groundFolder = gui.addFolder("Ground Controls");
+    	groundFolder.add(controls, 'rotationSpeed', 0, 0.005);
+    	// 注意：这里虽然可以尝试使用动态调整角度测试效果，经测试地面角度变化太快容易卡bug（即相交检测有问题）
+    	// 所以方法中的角度变换采用递增式变化
+    	groundFolder.add(controls, 'slopeGround').listen();
+    	groundFolder.add(controls, 'resetGround');
+
+    	var gravityFolder = gui.addFolder("Gravity Controls");
+    	gravityFolder.add(controls, 'gravityX', -100, 100).onChange(setSceneGravity);
+    	gravityFolder.add(controls, 'gravityY', -100, 100).onChange(setSceneGravity);
+    	gravityFolder.add(controls, 'gravityZ', -100, 100).onChange(setSceneGravity);
+
+    	var materialFolder = gui.addFolder("Material Controls");
+    	materialFolder.add(materialContr, 'cubeFriction', 0, 1);
+    	materialFolder.add(materialContr, 'cubeRestitution', 0, 1);
+    	materialFolder.add(materialContr, 'sphereFriction', 0, 1);
+    	materialFolder.add(materialContr, 'sphereRestitution', 0, 1);
+
+    	var constraintFolder = gui.addFolder("Physices Constraints");
+    	constraintFolder.add(constraintContr, 'acceleration', 0, 10);
+    	constraintFolder.add(constraintContr, 'addSliders');
+    	constraintFolder.add(constraintContr, 'toggleMoveSlider');
+    	constraintFolder.add(constraintContr, 'addDoor');
+    	constraintFolder.add(constraintContr, 'toggleMoveDoor');
+    	constraintFolder.add(constraintContr, 'addBallPin');
+    	var ballPinFolder = constraintFolder.addFolder("Control BallPin");
+    	ballPinFolder.add(constraintContr, 'motorTargetX', -Math.PI / 2, Math.PI / 2).onChange(constraintContr.updateBallPin);
+    	ballPinFolder.add(constraintContr, 'motorTargetY', -Math.PI / 2, Math.PI / 2).onChange(constraintContr.updateBallPin);
+    	ballPinFolder.add(constraintContr, 'motorTargetZ', -Math.PI / 2, Math.PI / 2).onChange(constraintContr.updateBallPin);
+    	
+    	constraintFolder.add(constraintContr, 'addCar');
+    	var carFolder = constraintFolder.addFolder("Control Car");
+    	carFolder.add(carContr, 'velocity', -10, 10).onChange(carContr.changeVelocity);
+      // carFolder.add(carContr, 'wheelAngle', -1, 1).onChange(carContr.changeOrientation);
+      // carFolder.add(carContr, 'loosenXRight', 0, 0.5).step(0.01).onChange(carContr.changeOrientation);
+      // carFolder.add(carContr, 'loosenXLeft', 0, 0.6).step(-0.01).onChange(carContr.changeOrientation);
+    }
+
+    /**
+     * 渲染
+     * @return {[type]} [description]
+     */
+    function render(){
+    	var delta = clock.getDelta();
+    	stats.update(); // 即时更新FPS
+    	
+    	orbitControls.update(delta);
+
+    	// 启动旋转地面
+    	if(controls.slopeGround){
+    		step += controls.rotationSpeed * direction;
+    		if(step >= Math.PI/6) direction = -1;
+    		if(step <= -Math.PI/6) direction = 1;
+    		if(controls.groundType == 'plane'){
+    			ground.rotation.z = step ;
+    		}else if(controls.groundType == 'hightMap'){
+    			ground.rotation.y = step;
+    		}
+				ground.__dirtyRotation = true;
+    	}
+
+
+    	scene.simulate(undefined, 1);
+    	// scene.simulate(undefined, 2);
+
+    	// 使用帧动画函数
+    	requestAnimationFrame(render);
+    	// scene.simulate();
+    	renderer.render( scene, camera );
+    }
+
+		/**
+		 * 初始化所有配置
+		 * @return {[type]} [description]
+		 */
+		function init(){
+			// 初始化组件
+			var stats = initStats();
+
+			// 创建场景, 这里的场景创建要使用Physijs的scene对象
+			scene = new Physijs.Scene; // 创建了一个已经应用了物理的场景
+
+			scene.setGravity(new THREE.Vector3( 0, -10, 0 )); // 设置了y轴方向的重力，创建的对象会竖直下落
+
+			// 创建相机
+			camera = new THREE.PerspectiveCamera( 45, window.innerWidth/window.innerHeight, 0.1, 1000 );
+			camera.position.x = -30;
+			camera.position.y = 30;
+			camera.position.z = 30;
+			camera.lookAt(scene.position); // 视线指向场景中心
+			// 创建渲染器
+			renderer = new THREE.WebGLRenderer();
+
+			// 擦除背景色
+			renderer.setClearColor(new THREE.Color( 0xEEEEEE, 1.0 ));
+			renderer.setSize(window.innerWidth, window.innerHeight); // 设置视口大小
+			renderer.shadowMapEnabled = true; // 启用阴影贴图
+
+			// 配置控制器
+			initControler();
+
+			// 展示辅助观察的世界坐标系
+      var axes = new THREE.AxisHelper(20);
+      scene.add(axes);
+
+      clock = new THREE.Clock();
+
+      orbitControls = new THREE.OrbitControls(camera);
+
+      createGround();
+
+      // var points = createPoints();
+
+      setSceneGravity();
+
+      // loadDominoObjects(points);
+
+			// 添加环境光
+			var ambientLight = new THREE.AmbientLight( 0x0C0C0C );
+			scene.add(ambientLight);
+
+			// 添加点光源,作为产生阴影的光源
+			var spotLight = new THREE.SpotLight(0xFFFFFF);
+			spotLight.position.set(-40, 60, -10);
+			spotLight.castShadow = true;
+			scene.add(spotLight);
+
+			// 把渲染内容输出至dom中
+			document.getElementById("webgl-output").appendChild(renderer.domElement);
+
+			
+			// 开始渲染
+			render();
+		}
+
+		/**
+		 * 添加两个球, 使两个球连接在一起, 暂时无法启用，有bug
+		 */
+		function addPointToPointBySphere(){
+			var color = colorScale(Math.random()).hex();
+			var sphere1 = new THREE.SphereGeometry(1.5, 20, 20);
+			var sphere2 = new THREE.SphereGeometry(1.5, 20, 20);
+			var material1 = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+				color: color
+			}), materialContr.sphereFriction, materialContr.sphereRestitution);
+			var material2 = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+				color: color
+			}), materialContr.sphereFriction, materialContr.sphereRestitution);
+
+			sphere1 = new Physijs.SphereMesh(sphere1, material1);
+			sphere1.position.z = -5;
+      sphere1.position.x = 25;
+      sphere1.position.y = 1;
+      scene.add(sphere1);
+
+      sphere2 = new Physijs.SphereMesh(sphere2, material2);
+      sphere2.position.z = 5;
+      sphere2.position.x = 17;
+      sphere2.position.y = 1;
+      scene.add(sphere2);
+      // 这个约束，可以将一个对象与另一个对象之间位置固定下来，一个移动了，另一个对象也会随之移动，之间的距离和方向保持不变
+      // 参数3是指定约束绑定的位置，如果sphere1远小于sphere2,则可指定sphere1的位置，但是如果只是相连，最好指定sphere2
+      // 如果不想将一个对象绑定到另一个对象，而是绑定场景中某一个点，那么可以忽略第二个参数，这样第一个对象就会跟你指定的位置
+      // 保持固定的距离，同时遵从其他物理定律
+      var sphereConstraint = new Physijs.PointConstraint(sphere1, sphere2, sphere1.position);
+      // 试验约束时，可以开启调试来观察连接问题(参数2：show_maker)
+      scene.addConstraint(sphereConstraint);
+		}
+
+		/**
+		 * 添加滑块
+		 * @param {[type]} posX [description]
+		 * @param {[type]} posY [description]
+		 * @param {[type]} posZ [description]
+		 */
+		function addSliderCubes(posX, posY, posZ) {
+			var color = colorScale(Math.random()).hex();
+      var sliderCube = new THREE.BoxGeometry(6, 2, 2);
+      var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+      	color: color
+      }), 0, 0); // 使用光滑材质
+      var sliderMesh = new Physijs.BoxMesh(sliderCube, material, 0.01);
+      sliderMesh.position.x = posY;
+      sliderMesh.position.y = posY;
+      sliderMesh.position.z = posZ;
+      sliderMesh.rotation.y = Math.PI / 2;
+      scene.add(sliderMesh);
+      meshs.push(sliderMesh);
+      // 这个约束，可以将某个对象的移动限制到某个轴上
+      // 参数：
+      // objecta: 指定约束对象a；
+      // objectb: 指定约束对象受哪个对象b约束（可选）, 不指定参数则受场景约束，指定了则当指定网格移动或旋转时
+      // 该滑块也会移动；
+      // position: 约束应用的位置（在将a约束至b时比较重要）；
+      // axis: 约束对象a沿着移动的轴，若指定了对象b,则相对于b方向。如果使用了线性马达和线性上下限，轴会出现一些奇怪的偏移，
+      // 想沿某轴移动：x:vec3(0, 1, 0), y:vec3(0, 0, Math.PI/2) z:vec3(Math.PI/2, 0, 0)
+      var constraint = new Physijs.SliderConstraint(sliderMesh, null, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
+      scene.addConstraint(constraint);
+      // 设定约束限制
+      // 参数：
+      // lin_lower: 线性上限
+      // lin_upper: 线性下限
+      // ang_lower: 角度上限
+      // ang_upper: 角度下限
+      constraint.setLimits(-21.3, 31, 0, 0);
+      // 设定达到限制时的反弹
+      // linear: 设置达到线性限制时的弹性
+      // angular: 达到角度限制时的弹性
+      constraint.setRestitution(0.1, 0.1);
+      return constraint;
+    }
+
+    /**
+     * 添加门折页，暂时无法启用，有bug
+     */
+    function addDoorHinges(){
+    	var color = colorScale(Math.random()).hex();
+    	var geometry = new THREE.BoxGeometry(8, 1, 1);
+    	var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+      	color: color
+      })); // 使用光滑材质
+      var doorLeft = new Physijs.BoxMesh(geometry, material, 0.3);
+      doorLeft.position.x = -6;
+      doorLeft.position.y = 2;
+      doorLeft.position.z = 0;
+      scene.add(doorLeft);
+      meshs.push(doorLeft);
+      // 创建旋转轴
+      var doorLeftPivot = new Physijs.CylinderMesh(new THREE.CylinderGeometry( 0.5, 0.5, 1, 15 ), material, 0);
+      doorLeftPivot.position.y = 1;
+      doorLeftPivot.position.x = -15;
+      doorLeftPivot.position.z = 0;
+      doorLeftPivot.rotation.y = 1.4;
+      scene.add(doorLeftPivot);
+      meshs.push(doorLeftPivot);
+      // 这个约束，可以将某个对象绕固定轴旋转
+      // 参数：
+      // objecta: 指定约束对象a；
+      // objectb: 指定约束对象受哪个对象b约束, 对象b网格移动或旋转时对象a也会移动；
+      // position: 约束应用的位置（在将a约束至b时比较重要）
+      // axis: 约束对象a沿着移动的轴,这里指定了y轴方向
+      doorConstraintLeft = new Physijs.HingeConstraint(doorLeft, doorLeftPivot, doorLeftPivot.position, new THREE.Vector3(0, 0, 1));
+      scene.addConstraint(doorConstraintLeft);
+      doorConstraintLeft.setLimits(
+        -2.2, // 指定旋转的最小弧度，开始点是1
+        -0.6, // 指定旋转的最大弧度，开始点是1
+        0.1, // 指定处于错误位置时（即被其他对象推动导致超出约束范围），进行纠正的速度，值越高纠正越快，因此最后限制在0.5以下
+        0 // 指定约束以什么样的比率改变速度，值越高，达到最小或最大角度会被弹回，0则不会超出
+      );
+    }
+
+    /**
+     * 创建门左侧约束
+     * @return {[type]} [description]
+     */
+    function createLeftFlipper() {
+    	var color = colorScale(Math.random()).hex();
+    	var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+      	color: color
+      }), 0, 0); // 使用光滑材质
+      var flipperLeft = new Physijs.BoxMesh(
+        new THREE.BoxGeometry(12, 1, 1), 
+        Physijs.createMaterial(new THREE.MeshPhongMaterial({opacity: 0.6, transparent: true})), 
+        0.3 // 这里的质量很重要
+      );
+      flipperLeft.position.x = -8;
+      flipperLeft.position.y = 1;
+      flipperLeft.position.z = 0;
+      scene.add(flipperLeft);
+      meshs.push(flipperLeft);
+
+      var flipperLeftPivot = new Physijs.CylinderMesh(new THREE.CylinderGeometry( 0.5, 0.5, 1, 15 ), material, 0);
+      flipperLeftPivot.position.y = 1;
+      flipperLeftPivot.position.x = -15;
+      flipperLeftPivot.position.z = 0;
+      flipperLeftPivot.rotation.y = 1.4;
+      scene.add(flipperLeftPivot);
+      meshs.push(flipperLeftPivot);
+
+     	// 这个约束，可以将某个对象绕固定轴旋转
+      // 参数：
+      // objecta: 指定约束对象a；
+      // objectb: 指定约束对象受哪个对象b约束, 对象b网格移动或旋转时对象a也会移动；
+      // position: 约束应用的位置（在将a约束至b时比较重要）
+      // axis: 约束对象a沿着移动的轴,这里指定了y轴方向
+      var constraint = new Physijs.HingeConstraint(flipperLeft, flipperLeftPivot, flipperLeftPivot.position, new THREE.Vector3(0, 1, 0));
+      scene.addConstraint(constraint);
+      constraint.setLimits(
+        -2.2, // 指定旋转的最小弧度，开始点是1
+        -0.6, // 指定旋转的最大弧度，开始点是1
+        0.1, // 指定处于错误位置时（即被其他对象推动导致超出约束范围），进行纠正的速度，值越高纠正越快，因此最后限制在0.5以下
+        0 // 指定约束以什么样的比率改变速度，值越高，达到最小或最大角度会被弹回，0则不会超出
+      );
+
+      return constraint;
+    }
+
+    /**
+     * 创建门右侧约束
+     * @return {[type]} [description]
+     */
+    function createRightFlipper() {
+    	var color = colorScale(Math.random()).hex();
+    	var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+		  	color: color
+		  }), 0, 0); // 使用光滑材质
+      var flipperRight = new Physijs.BoxMesh(
+        new THREE.BoxGeometry(12, 1, 1), 
+        Physijs.createMaterial(new THREE.MeshPhongMaterial({opacity: 0.6, transparent: true})), 
+        0.3 // 这里的质量很重要
+      );
+      flipperRight.position.x = 8;
+      flipperRight.position.y = 1;
+      flipperRight.position.z = 0;
+      flipperRight.castShadow = true;
+      scene.add(flipperRight);
+      meshs.push(flipperRight);
+
+      var flipperRightPivot = new Physijs.CylinderMesh(new THREE.CylinderGeometry( 0.5, 0.5, 1, 15 ), material, 0);
+      flipperRightPivot.position.y = 1;
+      flipperRightPivot.position.x = 15;
+      flipperRightPivot.position.z = 0;
+      flipperRightPivot.rotation.y = 1.4;
+      flipperRightPivot.castShadow = true;
+      scene.add(flipperRightPivot);
+      meshs.push(flipperRightPivot);
+
+      // 这个约束，可以将某个对象绕固定轴旋转
+      // 参数：
+      // objecta: 指定约束对象a；
+      // objectb: 指定约束对象受哪个对象b约束, 对象b网格移动或旋转时对象a也会移动；
+      // position: 约束应用的位置（在将a约束至b时比较重要）
+      // axis: 约束对象a沿着移动的轴,这里指定了y轴方向
+      var constraint = new Physijs.HingeConstraint(flipperRight, flipperRightPivot, flipperRightPivot.position, new THREE.Vector3(0, 1, 0));
+      scene.addConstraint(constraint);
+      constraint.setLimits(
+        -2.2, // 指定旋转的最小弧度，开始点是1
+        -0.6, // 指定旋转的最大弧度，开始点是1
+        0.1, // 指定处于错误位置时（即被其他对象推动导致超出约束范围），进行纠正的速度，值越高纠正越快，因此最后限制在0.5以下
+        0 // 指定约束以什么样的比率改变速度，值越高，达到最小或最大角度会被弹回，0则不会超出
+      );
+
+      return constraint;
+    }
+
+    /**
+     * 创建球销约束
+     * @return {[type]} [description]
+     */
+    function createConeTwist() {
+    	var color = colorScale(Math.random()).hex();
+      var sphere = new THREE.SphereGeometry(1);
+      var rotateCube = new THREE.BoxGeometry(2, 10, 2);
+
+      var sphereMesh = new Physijs.BoxMesh(sphere, Physijs.createMaterial(
+              new THREE.MeshPhongMaterial({color: color}), 0, 0), 0);
+      sphereMesh.position.z = 0;
+      sphereMesh.position.x = 0;
+      sphereMesh.position.y = 18;
+      scene.add(sphereMesh);
+      meshs.push(sphereMesh);
+
+      var rotateCubeMesh = new Physijs.SphereMesh(rotateCube, Physijs.createMaterial(
+              new THREE.MeshPhongMaterial({color: color}), 0, 0), 10);
+      rotateCubeMesh.position.z = 0;
+      rotateCubeMesh.position.x = 0;
+      rotateCubeMesh.position.y = 11.5;
+      scene.add(rotateCubeMesh);
+      meshs.push(rotateCubeMesh);
+
+
+      // 这个约束可以创建一个移动受一系列角度限制的约束，可以指定一个对象绕另一个对象转动时在x,y,z轴上的最小角速度和
+      // 最大角速度
+      var constraint = new Physijs.ConeTwistConstraint(sphereMesh, rotateCubeMesh, sphereMesh.position);
+
+      scene.addConstraint(constraint);
+      // 三个弧度值分别表示对象绕每个轴旋转的最大角速度
+      constraint.setLimit(0.5 * Math.PI, 0.5 * Math.PI, 0.5 * Math.PI);
+      constraint.setMaxMotorImpulse(1); // 设置马达能够施加多大的力量
+      constraint.setMotorTarget(new THREE.Vector3(0, 0, 0)); // 马达可以转动到的角度
+
+      return constraint;
+    }
+
+    /**
+     * 创建车轮
+     * @param  {[type]} position [description]
+     * @return {[type]}          [description]
+     */
+    function createWheel(position){
+    	var color = colorScale(Math.random()).hex();
+    	var geometry = new THREE.CylinderGeometry( 2, 2, 1, 15);
+			var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+				color: color
+			}), 1.0, 0.5);
+			var mesh = new Physijs.CylinderMesh(geometry, material, 100);
+			mesh.rotation.x = Math.PI / 2;
+			mesh.position.copy(position);
+    	return mesh;
+    }
+
+    /**
+     * 创建车子
+     * @return {[type]} [description]
+     */
+    function createCar(){
+    	var color = colorScale(Math.random()).hex();
+    	// 创建车子对象
+    	car = {};
+    	var geometry = new THREE.BoxGeometry(15, 4, 4);
+    	var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+    		color: color
+    	}), 0.5, 0.5);
+    	var carBody = new Physijs.BoxMesh(geometry, material, 500);
+    	carBody.position.set(5, 11, 5);
+    	scene.add(carBody);
+
+    	var wheelTopLeft = createWheel(new THREE.Vector3(0, 10, 0));
+    	var wheelTopRight = createWheel(new THREE.Vector3(0, 10, 10));
+     	var wheelBottomLeft = createWheel(new THREE.Vector3(10, 10, 0));
+      var wheelBottomRight = createWheel(new THREE.Vector3(10, 10, 10));
+    	
+    	scene.add(wheelTopLeft);
+    	scene.add(wheelTopRight);
+    	scene.add(wheelBottomLeft);
+    	scene.add(wheelBottomRight);
+
+    	// 分别给每个车轮添加约束
+      var tlCons = createWheelConstraint(wheelTopLeft, carBody, new THREE.Vector3(0, 10, 2));
+      scene.addConstraint(tlCons);
+    	var trCons = createWheelConstraint(wheelTopRight, carBody, new THREE.Vector3(0, 10, 8));
+      scene.addConstraint(trCons);
+      var blCons = createWheelConstraint(wheelBottomLeft, carBody, new THREE.Vector3(10, 10, 2));
+      scene.addConstraint(blCons);
+      var brCons = createWheelConstraint(wheelBottomRight, carBody, new THREE.Vector3(10, 10, 8));
+      scene.addConstraint(brCons);
+      // 至此，由于轮子在车身的重力影响下，而会向其他轴倾斜，而使车轮无法托起车身
+
+      // 设置前轮的角度约束
+      trCons.setAngularLowerLimit({x: 0, y: 0.5, z: 0.1});
+      trCons.setAngularUpperLimit({x: 0, y: 0.5, z: 0});
+      tlCons.setAngularLowerLimit({x: 0, y: 0.5, z: 0.1});
+      tlCons.setAngularUpperLimit({x: 0, y: 0.5, z: 0});
+      // 设置后轮的角度约束
+      brCons.setAngularLowerLimit({x: 0, y: 0, z: 0});
+      brCons.setAngularUpperLimit({x: 0, y: 0, z: 0});
+      blCons.setAngularLowerLimit({x: 0, y: 0, z: 0});
+      blCons.setAngularUpperLimit({x: 0, y: 0, z: 0});
+      // 为前轮设置马达
+      tlCons.configureAngularMotor(2, 0.1, 0, -2, 1500);
+      trCons.configureAngularMotor(2, 0.1, 0, -2, 1500);
+      // 启动马达
+      tlCons.enableAngularMotor(2);
+      trCons.enableAngularMotor(2);
+      // 将约束对象全部放入一个对象中，返回外部方便更改
+      car.tlCons = tlCons;
+      car.trCons = trCons;
+      car.blCons = blCons;
+      car.brCons = brCons;
+
+      return car;
+    }
+
+    /**
+     * 给每个车轮与车身之间创建约束
+     * @param  {[type]} wheel    [description]
+     * @param  {[type]} body     [description]
+     * @param  {[type]} position [description]
+     * @return {[type]}          [description]
+     */
+    function createWheelConstraint(wheel, body, position){
+    	var constraint = new Physijs.DOFConstraint(wheel, body, position);
+    	return constraint;
+    }
+
+		/**
+		 * 随机生成多个立方体
+		 */
+		function addRandomCubes(){
+			var cubeColor = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var geometry = new THREE.BoxGeometry( 2, 2, 2 );
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: cubeColor
+				}), materialContr.cubeFriction, materialContr.cubeRestitution);
+				// 随机质量(暂时该属性不确认是质量，后面研究源码后再处理)
+				// var mass =  Math.abs(Math.floor(Math.random() * 40) - 10); // 10~30
+				var cube = new Physijs.BoxMesh(geometry, material);
+				startRandomPosition(cube);
+				scene.add(cube);
+				meshs.push(cube);
+			}
+		}
+
+		/**
+		 * 随机生成多个球体
+		 */
+		function addRandomSpheres(){
+			var sphereColor = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var geometry = new THREE.SphereGeometry( 1, 20, 20 );
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: sphereColor
+				}), materialContr.sphereFriction, materialContr.sphereRestitution);
+				// 随机质量(暂时该属性不确认是质量，后面研究源码后再处理)
+				// var mass =  Math.abs(Math.floor(Math.random() * 40) - 10); // 10~30
+				var sphere = new Physijs.SphereMesh(geometry, material);
+				startRandomPosition(sphere);
+				scene.add(sphere);
+				meshs.push(sphere);
+			}
+		}
+
+		/**
+		 * 随机生成多个柱状图形（CylinderMesh 使用于一般的，上下大小一致的）
+		 */
+		function addRandomCylinders(){
+			var color = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var geometry = new THREE.CylinderGeometry( 1.5, 1.5, 4 );
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: color
+				}), materialContr.cubeFriction, materialContr.cubeRestitution);
+				var mesh = new Physijs.CylinderMesh(geometry, material);
+				startRandomPosition(mesh);
+				scene.add(mesh);
+				meshs.push(mesh);
+			}
+		}
+
+		/**
+		 * 随机生成多个圆锥体（ConeMesh 使用上下大小不一致的）
+		 */
+		function addRandomCones(){
+			var color = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var geometry = new THREE.CylinderGeometry( 0, 2, 5, 15, 6 );
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: color
+				}), materialContr.cubeFriction, materialContr.cubeRestitution);
+				var mesh = new Physijs.ConeMesh(geometry, material);
+				startRandomPosition(mesh);
+				scene.add(mesh);
+				meshs.push(mesh);
+			}
+		}
+
+		/**
+		 * 随机生成多个由多个几何体组合而成的胶囊体（CapsuleMesh 使用跟CylinderMesh类似）
+		 */
+		function addRandomCapsules(){
+			var color = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var mergeGeom = new THREE.Geometry();
+				// 创建好要合并的几何对象
+				var cylinderGeom = new THREE.CylinderGeometry(1, 1, 4);
+        var topSphereGeom = new THREE.SphereGeometry(1);
+        var bottomSphereGeom = new THREE.SphereGeometry(1);
+        // 分别给在合并几何体过程中哪些需要进行相对位移/旋转的对象生成变换矩阵
+        var matrix1 = new THREE.Matrix4().makeTranslation(0, 2, 0);
+        var matrix2 = new THREE.Matrix4().makeTranslation(0, -2, 0);
+        topSphereGeom.applyMatrix(matrix1);
+        bottomSphereGeom.applyMatrix(matrix2);
+        // 合并图形
+        mergeGeom.merge(topSphereGeom);
+        mergeGeom.merge(bottomSphereGeom);
+        mergeGeom.merge(cylinderGeom);
+
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: color
+				}), materialContr.sphereFriction, materialContr.sphereRestitution);
+				var mesh = new Physijs.CapsuleMesh(mergeGeom, material);
+				startRandomPosition(mesh);
+				scene.add(mesh);
+				meshs.push(mesh);
+			}
+		}
+
+		/**
+		 * 随机生成多个凸包（ConvexMesh 可用于多数的复杂图形，可以创建一个模拟复杂图形的凸包）
+		 */
+		function addRandomConvexs(){
+			var color = colorScale(Math.random()).hex();
+			// 随机生成数目限制在2~5之间
+			var randomNum = Math.abs(Math.floor(Math.random() * 10) - 5);
+			randomNum = randomNum < 2 ? 2 : randomNum;
+			for(var i=0; i < randomNum; i++){
+				var geometry = new THREE.TorusKnotGeometry( 0.5, 0.3, 64, 8, 2, 3, 10 );
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: color
+				}), materialContr.cubeFriction, materialContr.cubeRestitution);
+				var mesh = new Physijs.ConvexMesh(geometry, material);
+				startRandomPosition(mesh);
+				scene.add(mesh);
+				meshs.push(mesh);
+			}
+		}
+
+		/**
+		 * 设置物体在随机位置
+		 * @param  {[type]} obj [description]
+		 * @return {[type]}     [description]
+		 */
+		function startRandomPosition(obj){
+			// 指定同一高度下落，观察质量不同的小球的反应（建立在可以设定质量的情况下）
+			obj.position.set(Math.random() * 50 - 25, fallDownHight, Math.random() * 50 - 25);
+		}
+
+		function pushFirstDomino(){
+			dominos[0].rotation.z = -0.4; // 这里的旋转轴不对，后面再更改得自然些
+			dominos[0].__dirtyRotation = true; // 开启不自由转动开关，即可直接改变某个物体对象的旋转状态
+		}
+
+		/**
+		 * 给场景设置重力
+		 */
+		function setSceneGravity(){
+			scene.setGravity(new THREE.Vector3(controls.gravityX, controls.gravityY, controls.gravityZ));
+		}
+
+		/**
+		 * 加载多米诺骨牌
+		 * @return {[type]} [description]
+		 */
+		function loadDominoObjects(points){
+			points.forEach(function(point){
+				var geometry = new THREE.BoxGeometry(0.6, 6, 2);
+				var material = new Physijs.createMaterial(new THREE.MeshPhongMaterial({
+					color: Math.random() * 0xFFFFFF,
+					opacity: 0.9,
+					transparent: true
+				}), 0.4, 0.4); // 这里设置摩擦力和回弹都偏中
+				var domino = new Physijs.BoxMesh(geometry, material); // 这里也不设置质量
+				domino.position.copy(point);
+				domino.position.y = 3.5; // 确保骨牌底部贴紧地面
+				domino.lookAt(new THREE.Vector3(0, 3.5, 0)); // 这样做会使物体中心指向当前位置
+				scene.add(domino);
+				dominos.push(domino);
+        meshs.push(domino);
+			})
+		}
+
+		/**
+		 * 给几何体创建位置点集
+		 * @return {[type]} [description]
+		 */
+		function createPoints(){
+			var points = [];
+      var r = 27; // 最大半径
+      var cX = 0; // 整体曲线的x偏移 （即在世界坐标系中的位置）, x轴
+      var cY = 0; // 整体曲线的y偏移, z轴
+
+      var pointSpace = 6; // 点间距
+      var rChangeScope = 1440; // 半径变化范围，数值要与总圈数的角度有关
+
+      var circleOffset = 0;
+
+      for (var i = 0; i < 1000; i += pointSpace + circleOffset) {
+
+          circleOffset = 4.5 * (i / 360); // 控制i的变化，可控制形状和生成点的数目
+          var radiusChanged = (r / rChangeScope) * (rChangeScope - i); // 随i逐步变化
+
+          var x = radiusChanged * Math.cos(i * (Math.PI / 180)) + cX;
+          var z = radiusChanged * Math.sin(i * (Math.PI / 180)) + cY;
+          var y = 0;
+          points.push(new THREE.Vector3(x, y, z));
+
+          // debug:
+     			// var y = 5;
+     			// var spGeom = new THREE.SphereGeometry(0.2);
+					// var material = new THREE.MeshBasicMaterial({color: 0xFF0000, transparent: false});
+					// var spMesh = new THREE.Mesh(spGeom, material);
+					// spMesh.position.set(x, y, z);
+					// scene.add(spMesh);
+					
+      }
+      return points;
+		}
+
+		
+
+		/**
+		 * 创建有包围的地面
+		 * @return {[type]} [description]
+		 */
+		function createGround(){
+			// 参数：THREE材质对象，摩擦力系数，回弹系数
+			var groundMaterial = Physijs.createMaterial(
+				new THREE.MeshPhongMaterial( {
+					map: THREE.ImageUtils.loadTexture("../assets/textures/general/wood-2.jpg")
+				} ), materialContr.planeFriction, materialContr.planeRestitution);
+			// 参数：几何对象，材质，质量
+			ground = new Physijs.BoxMesh(new THREE.BoxGeometry(60, 1, 60), groundMaterial, 0);
+			// 左边框
+			var borderLeft = new Physijs.BoxMesh(new THREE.BoxGeometry(60, 3, 1), groundMaterial, 0);
+			borderLeft.position.set(0, 1, -30);
+			ground.add(borderLeft);
+			// 右边框
+			var borderRight = new Physijs.BoxMesh(new THREE.BoxGeometry(60, 3, 1), groundMaterial, 0);
+			borderRight.position.set(0, 1, 30);
+			ground.add(borderRight);
+			// 上边框
+			var borderTop = new Physijs.BoxMesh(new THREE.BoxGeometry(60, 3, 1), groundMaterial, 0);
+			borderTop.position.set(30, 1, 0);
+			borderTop.rotation.y = 0.5 * Math.PI;
+			ground.add(borderTop);
+			// 下边框
+			var borderBottom = new Physijs.BoxMesh(new THREE.BoxGeometry(60, 3, 1), groundMaterial, 0);
+			borderBottom.position.set(-30, 1, 0);
+			borderBottom.rotation.y = 0.5 * Math.PI;
+			ground.add(borderBottom);
+			ground.position.x = 0;
+      ground.position.z = 0;
+			scene.add(ground);
+		}
+
+		/**
+		 * 创建高度图地形
+		 * @param  {[type]} pn [噪音对象]
+		 * @return {[type]}    [description]
+		 */
+		function createHightMapGround(pn){
+			// 参数：THREE材质对象，摩擦力系数，回弹系数
+			var groundMaterial = Physijs.createMaterial(
+				new THREE.MeshPhongMaterial( {
+					map: THREE.ImageUtils.loadTexture("../assets/grasslight-big.jpg")
+				} ), materialContr.planeFriction, materialContr.planeRestitution);
+			groundMaterial.map.wrapS = THREE.RepeatWrapping;
+			groundMaterial.map.wrapT = THREE.RepeatWrapping;
+			groundMaterial.map.repeat.set(3, 3);
+			var groundGeometry = new THREE.PlaneGeometry(60, 60, 100, 100);
+			for(var i=0, len = groundGeometry.vertices.length; i < len; i++){
+				var vertex = groundGeometry.vertices[i];
+				// 给顶点在x轴和y轴添加噪音处理
+				var value = pn.noise(vertex.x / 10, vertex.y / 10, 0);
+				vertex.z = value * 10;
+			}
+			// 重新计算面的法向量和顶点法向量
+			groundGeometry.computeFaceNormals();
+      groundGeometry.computeVertexNormals();
+      // 后三个参数分别是：mass, xdiv(宽), ydiv(长)
+			ground = new Physijs.HeightfieldMesh(groundGeometry, groundMaterial, 0, 100, 100);
+			ground.rotation.x = -0.5 * Math.PI;
+      // ground.rotation.y = 0.4;
+      ground.receiveShadow = true;
+
+      scene.add(ground);
+		}
+
+		/**
+     * 初始化性能检测器
+     * @return {[type]} [description]
+     */
+    function initStats(){
+    	stats = new Stats();
+    	stats.setMode(0); // 0: fps, 1: ms
+    	stats.domElement.style.position = 'absolute';
+      stats.domElement.style.left = '0px';
+      stats.domElement.style.top = '0px';
+
+      document.getElementById("stats-output").appendChild(stats.domElement);
+    }
+
+		/**
+		 * 窗口大小被重置
+		 * @return {[type]} [description]
+		 */
+		function onResizeWindow(){
+			// 相机宽高比
+			camera.aspect = window.innerWidth/window.innerHeight;
+			camera.updateProjectionMatrix();
+			renderer.setSize( window.innerWidth, window.innerHeight );
+		}
+
+		window.onload = init;
+
+		window.addEventListener('resize', onResizeWindow, false);
+
+	</script>
+</body>
+</html>

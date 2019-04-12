@@ -1,0 +1,101 @@
+<html>
+  <head>
+    <script src="libs/aframe-v0.8.2.js"></script>
+    <script src="libs/aframe-ar.js"></script>
+    <script src="libs/vconsole.min.js"></script>
+    <script type="text/javascript">
+			var vConsole = new VConsole();
+			// 
+    	ARController.getUserMediaARController({facingMode: { exact: 'environment' }})
+   //  	AFRAME.registerComponent('text1', {
+			//   schema: {type: 'string'},
+			//   init: function () {
+			    
+			//   },
+			//   update: function (oldData) {
+			//   	console.log(oldData)
+			//   }
+			// });
+			// AFRAME.registerComponent('text2', {
+			//   schema: {type: 'string'},
+			//   init: function () {
+			    
+			//   },
+			//   update: function (oldData) {
+			//   	console.log(oldData)
+			//   }
+			// });
+			// AFRAME.registerComponent('text3', {
+			//   schema: {type: 'string'},
+			//   init: function () {
+			    
+			//   },
+			//   update: function (oldData) {
+			//   	console.log(oldData)
+			//   }
+			// });
+
+			if(window.DeviceOrientationEvent) {
+				window.addEventListener('deviceorientation', function(event) {
+					// alert(event)
+					var a = document.getElementById('alpha'),           
+							b = document.getElementById('beta'),           
+							g = document.getElementById('gamma');         
+
+					// 判断是否有方向webkit
+					// 
+					console.log(event)
+	        if(event.webkitCompassHeading) {
+	        	// alert(JSON.stringify(event))
+	        	console.log(event)
+	          alpha = - event.webkitCompassHeading; // iOS 裝置必須使用 event.webkitCompassHeading
+	          // compass.style.WebkitTransform = 'rotate(-' + alpha + 'deg)';
+	          console.log('IOS:',alpha)
+	          // show.innerHTML = alpha;
+	        } else {
+	          alpha = event.alpha;
+	          console.log('alpha:',alpha)
+	          if(!window.chrome) {
+	            alpha = alpha - 270;
+	            console.log('is chrome core', alpha)
+	          }
+	        }
+
+	        beta = event.beta;      
+					gamma = event.gamma;
+
+					document.querySelector('[text1]').setAttribute('value', 'alpha:' + Math.round(alpha))
+					document.querySelector('[text2]').setAttribute('value', 'beta:' + Math.round(beta))
+					document.querySelector('[text3]').setAttribute('value', 'gamma:' + Math.round(gamma))
+
+					
+					document.getElementById('camera').setAttribute('rotation', '0 ' + Math.round(alpha) + ' 0')
+					
+							  
+				}, false); 
+			}else{     
+				alert('浏览器不支持陀螺仪'); 
+			}
+
+
+    </script>
+
+  </head>
+  <body style='margin : 0px; overflow: hidden;'>
+    <a-scene embedded arjs="debugUIEnabled: false;">
+
+    	<!-- <a-box position="0 1 -5" rotation="0 0 0" color="#4CC3D9"></a-box> -->
+
+    	<!-- <a-entity geometry="primitive: box;" position="0 1 -5" rotation="0 0 0"></a-entity> -->
+
+    	<a-text text1 position="0 2 -4" value="alpha"></a-text>
+    	<a-text text2 position="-1 2 -4" value="beta"></a-text>
+    	<a-text text3 position="1 2 -4" value="gamma"></a-text>
+
+    	<a-entity id="camera" camera="active: true" position="0 2 0" look-controls rotation="0 0 0"></a-entity>
+
+    </a-scene>
+
+    
+  </body>
+</html>
